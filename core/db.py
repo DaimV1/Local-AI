@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Any
 
 from dotenv import load_dotenv
+from pydantic import BaseModel
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
@@ -30,6 +31,8 @@ from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+
+from core.events import EVENT_PAYLOAD_TYPES, EventType
 
 load_dotenv()
 
@@ -197,3 +200,35 @@ def session_scope(database_url: str | None = None) -> Generator[Session, None, N
         raise
     finally:
         session.close()
+
+
+def record_event(
+    session: Session,
+    *,
+    run_id: uuid.UUID,
+    event_type: EventType,
+    payload: BaseModel,
+    task_id: uuid.UUID | None = None,
+    agent_id: uuid.UUID | None = None,
+) -> EventORM:
+    """Validate `payload` against the schema registered for `event_type`,
+    then insert the append-only event row. The single place events are
+    written, so every event on the stream is guaranteed typed (rule 5)."""
+    expected = EVENT_PAYLOAD_TYPES[event_type]
+    if not isinstance(payload, expected):
+        raise TypeError(
+            f"event {event_type} requires a {expected.__name__} payload, "
+            f"got {type(payload).__name__}"
+        )
+
+    event = EventORM(
+        id=uuid.uuid4(),
+        run_id=run_id,
+        task_id=task_id,
+        agent_id=agent_id,
+        type=event_type.value,
+        payload=payload.model_dump(mode="json"),
+    )
+    session.add(event)
+    session.flush()
+    return event
