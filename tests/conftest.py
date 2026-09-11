@@ -47,21 +47,36 @@ def _migrated_pg_url(pg_url: str) -> str:
     return pg_url
 
 
+TABLES = ["events", "artifacts", "approvals", "tasks", "runs", "agents"]
+
+
+def _truncate_all(engine: sa.Engine) -> None:
+    with engine.begin() as conn:
+        conn.execute(sa.text(f"TRUNCATE TABLE {', '.join(TABLES)} CASCADE"))
+
+
 @pytest.fixture
-def pg_session(_migrated_pg_url: str) -> Generator[Session, None, None]:
+def pg_engine(_migrated_pg_url: str) -> Generator[sa.Engine, None, None]:
     import core.db as db_module
-    from core.db import get_engine, get_sessionmaker
+    from core.db import get_engine
 
     db_module._engine = None
     db_module._SessionLocal = None
 
     engine = get_engine(_migrated_pg_url)
-    session = get_sessionmaker(_migrated_pg_url)()
+    try:
+        yield engine
+    finally:
+        _truncate_all(engine)
+
+
+@pytest.fixture
+def pg_session(pg_engine: sa.Engine) -> Generator[Session, None, None]:
+    from core.db import get_sessionmaker
+
+    session = get_sessionmaker()()
     try:
         yield session
         session.rollback()
     finally:
         session.close()
-        tables = ["events", "artifacts", "approvals", "tasks", "runs", "agents"]
-        with engine.begin() as conn:
-            conn.execute(sa.text(f"TRUNCATE TABLE {', '.join(tables)} CASCADE"))
