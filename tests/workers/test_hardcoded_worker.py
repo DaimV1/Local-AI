@@ -133,7 +133,9 @@ def test_budget_exceeded_requests_approval_without_calling_the_model(
     execute_task(pg_session, claimed, agent, model_caller=stub)
 
     pg_session.refresh(claimed)
+    pg_session.refresh(agent)
     assert claimed.status == "awaiting_approval"
+    assert agent.status == "idle"
     assert stub.calls == []
 
     approval = pg_session.execute(
@@ -183,7 +185,9 @@ def test_model_failure_marks_the_task_failed(pg_session: Session) -> None:
     execute_task(pg_session, claimed, agent, model_caller=stub)
 
     pg_session.refresh(claimed)
+    pg_session.refresh(agent)
     assert claimed.status == "failed"
+    assert agent.status == "idle"
 
     artifacts = pg_session.execute(
         select(ArtifactORM).where(ArtifactORM.task_id == task.id)

@@ -123,6 +123,7 @@ def execute_task(
         approval = ApprovalORM(id=uuid.uuid4(), run_id=run.id, task_id=task.id, reason=reason)
         session.add(approval)
         task.status = "awaiting_approval"
+        agent.status = "idle"
         session.flush()
         record_event(
             session,
@@ -161,6 +162,7 @@ def execute_task(
         response = model_caller(resolved.primary, task.spec["instructions"])
     except Exception as exc:  # the model call is the one step that can fail
         task.status = "failed"
+        agent.status = "idle"
         session.flush()
         record_event(
             session,
