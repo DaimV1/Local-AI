@@ -1,10 +1,12 @@
 # Phase 1 Runbook
 
-Everything in this repo was written and tested against a real Postgres in
-the build sandbox (its Docker daemon wasn't available there — see
-`agent-platform-build-spec.md`'s ambiguity #1), but `docker compose up`
-itself has not been run end to end. Run through this on your workstation
-and tell me what breaks.
+Everything Python/TypeScript in this repo was written and tested against
+a real Postgres and a real headless-browser dashboard session in the
+build sandbox. `docker compose up` itself has not been run end to end:
+the sandbox's Docker daemon can start, but its network policy blocks
+pulling images from Docker Hub / GHCR (confirmed via the proxy's own
+status endpoint — a policy-denied 403, not a transient failure). Run
+through this on your workstation and tell me what breaks.
 
 ## Prerequisites
 
@@ -13,14 +15,35 @@ and tell me what breaks.
   Docker) so it has direct GPU access
 - `uv` (https://docs.astral.sh/uv/), Python 3.12
 - Node 22+ (only needed if you want to run the dashboard outside Docker)
+- `openssl` (for generating Langfuse's secrets below — it ships with
+  every Linux/macOS install)
 
 ## 1. Configure
 
 ```bash
 cp .env.example .env
-# edit .env: set POSTGRES_PASSWORD, LITELLM_MASTER_KEY, and (optional)
-# ANTHROPIC_API_KEY if you want the fallback tier to work
 ```
+
+Edit `.env`:
+
+- `POSTGRES_PASSWORD`, `LITELLM_MASTER_KEY` — pick anything
+- `ANTHROPIC_API_KEY` — optional, only needed for the fallback tier
+- `LANGFUSE_NEXTAUTH_SECRET`, `LANGFUSE_SALT`, `LANGFUSE_ENCRYPTION_KEY` —
+  three **distinct** values, each `openssl rand -hex 32` (`ENCRYPTION_KEY`
+  specifically must be 64 hex chars; compose refuses to start Langfuse if
+  any of the three is left as the placeholder)
+
+Every `docker compose` command below needs `--env-file .env` — compose's
+automatic `.env` discovery looks next to the compose file
+(`docker/docker-compose.yml`), not the repo root where you just created
+it. Easiest to just alias it once per shell:
+
+```bash
+alias dc="docker compose --env-file .env -f docker/docker-compose.yml"
+```
+
+(All commands below assume this alias and that you're running them from
+the repo root.)
 
 `registry/models.yaml` ships with the exact model identifiers from the
 build spec's own example (`qwen3.6-27b`, `gemma4-12b`). Pull whatever you
@@ -48,23 +71,24 @@ committed.
 ## 3. Bring up the stack
 
 ```bash
-docker compose -f docker/docker-compose.yml up -d --build
+dc up -d --build
 ```
 
 This starts Postgres, Redis, LiteLLM, Langfuse, the API (which runs
 `alembic upgrade head` on boot), the worker, and the dashboard.
 
-Langfuse is pinned to `langfuse/langfuse:2` (needs only Postgres, unlike
-v3's ClickHouse + object storage requirement) — I could not verify this
-against Langfuse's current docs from the build sandbox (network egress to
-langfuse.com is blocked there). If it doesn't come up cleanly, that
-container is the one to look at first; nothing else in the stack depends
-on it for Phase 1.
+Langfuse is pinned to `langfuse/langfuse:2`, which needs only Postgres
+(v3 additionally wants ClickHouse and S3-compatible object storage). I
+checked this against `langfuse/langfuse`'s own v2 `docker-compose.yml` on
+GitHub and matched its required env vars (`DATABASE_URL`, `NEXTAUTH_URL`,
+`NEXTAUTH_SECRET`, `SALT`, `ENCRYPTION_KEY`) — but I still haven't run it,
+so treat first boot as the real test. Revisit the v2 pin when Phase 5
+wires real trace linking.
 
 Check everything is healthy:
 
 ```bash
-docker compose -f docker/docker-compose.yml ps
+dc ps
 ```
 
 ## 4. Run the gate
@@ -86,20 +110,25 @@ docker compose -f docker/docker-compose.yml ps
 # edit registry/models.yaml: change tiers.planner.primary to point at a
 # different endpoint (or a different backend.model on the same endpoint)
 uv run python -m registry.generate_litellm_config
-docker compose -f docker/docker-compose.yml restart litellm worker
+dc restart litellm worker
 ```
 
 Start a new run — it should use the new model, with zero code changes.
 
 ## Troubleshooting
 
+- **Langfuse container won't start / complains about a missing var**:
+  double check `LANGFUSE_NEXTAUTH_SECRET`, `LANGFUSE_SALT`, and
+  `LANGFUSE_ENCRYPTION_KEY` are all set to distinct real values in `.env`,
+  not left as `change-me` — compose enforces this and will refuse to
+  start the service otherwise, naming which one is missing.
 - **Task always fails immediately with a connection error**: the worker
   can't reach LiteLLM, or LiteLLM can't reach Ollama. Check
-  `docker compose logs litellm` and confirm Ollama is listening on
-  `localhost:11434` on the host (the compose file adds
-  `host.docker.internal` for containers to reach it).
+  `dc logs litellm` and confirm Ollama is listening on `localhost:11434`
+  on the host (the compose file adds `host.docker.internal` for
+  containers to reach it).
 - **`alembic upgrade head` fails on api container start**: check
-  `docker compose logs api` — likely Postgres wasn't ready yet despite the
+  `dc logs api` — likely Postgres wasn't ready yet despite the
   healthcheck, or `DATABASE_URL` in `.env` doesn't match what you set for
   `POSTGRES_*`.
 - **Dashboard shows a CORS error in the console**: shouldn't happen (CORS
@@ -113,7 +142,7 @@ The suite skips every integration test if Postgres isn't reachable. To
 run them for real:
 
 ```bash
-# a local Postgres, or `docker compose -f docker/docker-compose.yml up -d postgres`
+# a local Postgres, or `dc up -d postgres`
 export TEST_DATABASE_URL="postgresql+psycopg://local_ai:change-me@localhost:5432/local_ai_test"
 uv run pytest
 ```
