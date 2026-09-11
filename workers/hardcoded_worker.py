@@ -5,25 +5,24 @@ every transition, writes an artifact, and honors cooperative cancellation
 (the Phase 1 kill switch: the API flips the task to `cancelled` and this
 worker notices at its next checkpoint — there's no per-task container to
 signal yet, that arrives with Phase 2 sandboxing).
+
+Every state transition commits immediately rather than accumulating in
+one long transaction. That's not just tidiness: `claim_next_pending_task`
+takes a row lock via `SELECT ... FOR UPDATE`, and Postgres holds a lock on
+any row a transaction has written until that transaction ends — so if the
+whole claim-through-completion sequence stayed in one transaction, the
+kill switch's `UPDATE tasks SET status='cancelled'` would block for the
+entire (potentially slow) model call instead of applying immediately.
 """
 
 from __future__ import annotations
 
-import time
 import uuid
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from core.db import (
-    AgentORM,
-    ApprovalORM,
-    ArtifactORM,
-    RunORM,
-    TaskORM,
-    record_event,
-    session_scope,
-)
+from core.db import AgentORM, ApprovalORM, ArtifactORM, RunORM, TaskORM, record_event
 from core.events import (
     AgentHeartbeatPayload,
     ApprovalRequestedPayload,
@@ -40,8 +39,6 @@ from orchestrator.budgets import check_budget
 from registry.resolver import DEFAULT_REGISTRY_PATH, resolve_tier
 from workers.model_caller import LiteLLMCaller, ModelCaller
 
-POLL_INTERVAL_SECONDS = 2.0
-
 
 def ensure_agent(session: Session, *, name: str, role: str, tier: str) -> AgentORM:
     agent = session.execute(select(AgentORM).where(AgentORM.name == name)).scalar_one_or_none()
@@ -50,7 +47,7 @@ def ensure_agent(session: Session, *, name: str, role: str, tier: str) -> AgentO
 
     agent = AgentORM(id=uuid.uuid4(), name=name, role=role, tier=tier, status="idle")
     session.add(agent)
-    session.flush()
+    session.commit()
     return agent
 
 
@@ -78,6 +75,10 @@ def claim_next_pending_task(session: Session, agent: AgentORM) -> TaskORM | None
         event_type=EventType.TASK_CLAIMED,
         payload=TaskClaimedPayload(),
     )
+    # Commit now: this ends the transaction holding the FOR UPDATE lock,
+    # so the row is free the moment the task is claimed rather than for
+    # as long as the caller keeps the session open.
+    session.commit()
     return task
 
 
@@ -98,6 +99,7 @@ def _pause_for_cancellation(session: Session, task: TaskORM, agent: AgentORM) ->
         event_type=EventType.AGENT_HEARTBEAT,
         payload=AgentHeartbeatPayload(status="paused"),
     )
+    session.commit()
 
 
 def execute_task(
@@ -143,9 +145,11 @@ def execute_task(
             event_type=EventType.APPROVAL_REQUESTED,
             payload=ApprovalRequestedPayload(approval_id=approval.id, reason=reason),
         )
+        session.commit()
         return
 
     task.status = "running"
+    task.attempt += 1
     session.flush()
     record_event(
         session,
@@ -155,6 +159,9 @@ def execute_task(
         event_type=EventType.TASK_STARTED,
         payload=TaskStartedPayload(),
     )
+    # Commit before the (potentially slow, network-bound) model call so
+    # this row isn't locked for its duration — see the module docstring.
+    session.commit()
 
     resolved = resolve_tier(agent.tier, registry_path)
 
@@ -172,6 +179,7 @@ def execute_task(
             event_type=EventType.TASK_FAILED,
             payload=TaskFailedPayload(error=str(exc)),
         )
+        session.commit()
         return
 
     record_event(
@@ -187,6 +195,7 @@ def execute_task(
             latency_ms=response.latency_ms,
         ),
     )
+    session.commit()
 
     if _is_cancelled(session, task.id):
         _pause_for_cancellation(session, task, agent)
@@ -219,27 +228,4 @@ def execute_task(
         event_type=EventType.TASK_COMPLETED,
         payload=TaskCompletedPayload(summary=response.text[:500]),
     )
-
-
-def run_once(*, database_url: str | None = None, model_caller: ModelCaller | None = None) -> bool:
-    """Claim and execute a single pending task, if any. Returns whether it
-    found work to do."""
-    with session_scope(database_url) as session:
-        agent = ensure_agent(session, name="hardcoded-worker", role="planner", tier="planner")
-        task = claim_next_pending_task(session, agent)
-        if task is None:
-            return False
-        execute_task(session, task, agent, model_caller=model_caller)
-        return True
-
-
-def main() -> None:
-    print("hardcoded-worker: polling for tasks (Ctrl+C to stop)")
-    while True:
-        did_work = run_once()
-        if not did_work:
-            time.sleep(POLL_INTERVAL_SECONDS)
-
-
-if __name__ == "__main__":
-    main()
+    session.commit()

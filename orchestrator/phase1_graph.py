@@ -11,6 +11,7 @@ from Postgres rather than losing progress. Phase 2 adds real branching
 from __future__ import annotations
 
 import os
+import time
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -21,7 +22,9 @@ from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from core.db import AgentORM, TaskORM, session_scope
-from workers.hardcoded_worker import execute_task
+from workers.hardcoded_worker import claim_next_pending_task, ensure_agent, execute_task
+
+POLL_INTERVAL_SECONDS = 2.0
 
 
 class Phase1State(TypedDict):
@@ -90,3 +93,34 @@ def run_task_via_graph(
         )
         status: str = result["status"]
         return status
+
+
+def run_once(*, database_url: str | None = None) -> bool:
+    """Claim a single pending task, if any, and run it through the
+    checkpointed graph above. Returns whether it found work to do.
+
+    Claiming happens in its own short transaction (see
+    workers.hardcoded_worker's module docstring for why) before handing
+    off to the graph, which opens its own session per node.
+    """
+    with session_scope(database_url) as session:
+        agent = ensure_agent(session, name="hardcoded-worker", role="planner", tier="planner")
+        task = claim_next_pending_task(session, agent)
+        if task is None:
+            return False
+        task_id, agent_id, run_id = task.id, agent.id, task.run_id
+
+    run_task_via_graph(task_id, agent_id, run_id, database_url=database_url)
+    return True
+
+
+def main() -> None:
+    print("hardcoded-worker: polling for tasks (Ctrl+C to stop)")
+    while True:
+        did_work = run_once()
+        if not did_work:
+            time.sleep(POLL_INTERVAL_SECONDS)
+
+
+if __name__ == "__main__":
+    main()

@@ -11,4 +11,4 @@ COPY orchestrator ./orchestrator
 COPY workers ./workers
 COPY registry ./registry
 
-CMD ["uv", "run", "python", "-m", "workers.hardcoded_worker"]
+CMD ["uv", "run", "python", "-m", "orchestrator.phase1_graph"]
