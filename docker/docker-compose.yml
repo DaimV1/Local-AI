@@ -1,0 +1,98 @@
+name: local-ai
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-local_ai}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-local_ai}
+  REDIS_URL: redis://redis:6379/0
+  LITELLM_BASE_URL: http://litellm:4000
+  LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-change-me}
+  WORKSPACE_ROOT: /workspaces
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-local_ai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_DB: ${POSTGRES_DB:-local_ai}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-local_ai}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    command: ["--config", "/app/config.yaml"]
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-change-me}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      - ./litellm_config.generated.yaml:/app/config.yaml:ro
+    # Ollama runs natively on the GPU workstation, not in compose; this
+    # lets the litellm container reach it as models.yaml's endpoints do.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "4000:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Pinned to v2: it needs only Postgres, unlike v3 (ClickHouse + object
+  # storage). Revisit the pin when Phase 5 wires real trace linking.
+  langfuse:
+    image: langfuse/langfuse:2
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-local_ai}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/langfuse
+      NEXTAUTH_URL: http://localhost:3001
+      NEXTAUTH_SECRET: ${LANGFUSE_SECRET_KEY:-change-me}
+      SALT: ${LANGFUSE_SECRET_KEY:-change-me}
+    ports:
+      - "3001:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: ..
+      dockerfile: docker/api.Dockerfile
+    environment:
+      <<: *app-env
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/worker.Dockerfile
+    environment:
+      <<: *app-env
+    volumes:
+      - ../workspaces:/workspaces
+    depends_on:
+      postgres:
+        condition: service_healthy
+      litellm:
+        condition: service_started
+
+volumes:
+  postgres_data:
