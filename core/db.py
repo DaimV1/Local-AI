@@ -49,8 +49,12 @@ def _fk_uuid(target: str, *, nullable: bool = True) -> Mapped[uuid.UUID]:
     return mapped_column(PGUUID(as_uuid=True), ForeignKey(target), nullable=nullable)
 
 
-def _timestamp(*, server_default_now: bool = False) -> Mapped[datetime]:
-    kwargs: dict[str, Any] = {"server_default": func.now()} if server_default_now else {}
+def _timestamp(*, server_default_now: bool = False, onupdate_now: bool = False) -> Mapped[datetime]:
+    kwargs: dict[str, Any] = {}
+    if server_default_now:
+        kwargs["server_default"] = func.now()
+    if onupdate_now:
+        kwargs["onupdate"] = func.now()
     return mapped_column(TIMESTAMP(timezone=True), **kwargs)
 
 
@@ -69,7 +73,7 @@ class AgentORM(Base):
     last_heartbeat: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     created_at: Mapped[datetime] = _timestamp(server_default_now=True)
-    updated_at: Mapped[datetime] = _timestamp(server_default_now=True)
+    updated_at: Mapped[datetime] = _timestamp(server_default_now=True, onupdate_now=True)
 
 
 class RunORM(Base):
@@ -116,7 +120,7 @@ class TaskORM(Base):
     budget_remaining: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     result: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = _timestamp(server_default_now=True)
-    updated_at: Mapped[datetime] = _timestamp(server_default_now=True)
+    updated_at: Mapped[datetime] = _timestamp(server_default_now=True, onupdate_now=True)
 
 
 class EventORM(Base):
