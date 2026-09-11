@@ -1,0 +1,56 @@
+# The only place a model name may appear (enforced by
+# tests/registry/test_no_model_names_outside_registry.py).
+#
+# Each entry under `endpoints` describes two hops:
+#   - how a worker calls it: always the LiteLLM proxy, by `model` alias
+#   - how the LiteLLM proxy reaches the real backend: `backend`
+#
+# Swapping a tier's model is an edit here, then regenerate the proxy config:
+#   uv run python -m registry.generate_litellm_config
+# No code change required (design rule 1).
+
+tiers:
+  planner:
+    primary: local/qwen3.6-27b
+    fallback: api/claude-sonnet
+    max_context: 128000
+  coder:
+    primary: local/qwen3.6-27b
+    fallback: api/claude-sonnet
+  researcher:
+    primary: local/qwen3.6-27b
+    fallback: api/claude-sonnet
+  judge:
+    primary: local/gemma4-12b
+  bulk:
+    primary: local/gemma4-12b
+    concurrency_limit: 4
+
+endpoints:
+  local/qwen3.6-27b:
+    provider: openai
+    api_base: http://litellm:4000
+    model: qwen3.6-27b
+    backend:
+      provider: ollama
+      # Ollama runs natively on the GPU workstation, not in compose.
+      api_base: http://host.docker.internal:11434
+      model: qwen3.6-27b
+
+  local/gemma4-12b:
+    provider: openai
+    api_base: http://litellm:4000
+    model: gemma4-12b
+    backend:
+      provider: ollama
+      api_base: http://host.docker.internal:11434
+      model: gemma4-12b
+
+  api/claude-sonnet:
+    provider: openai
+    api_base: http://litellm:4000
+    model: claude-sonnet
+    backend:
+      provider: anthropic
+      model: claude-sonnet-4-5
+      api_key_env: ANTHROPIC_API_KEY

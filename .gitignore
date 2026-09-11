@@ -16,3 +16,5 @@ dashboard/dist/
 
 data/
 workspaces/
+
+docker/litellm_config.generated.yaml
