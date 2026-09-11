@@ -36,9 +36,9 @@ def test_stream_events_yields_existing_events_as_sse_frames(pg_session: Session)
     first = next(gen)
     second = next(gen)
 
-    assert "event: run_started" in first
+    assert '"type": "run_started"' in first
     assert '"goal": "ship phase 1"' in first
-    assert "event: task_created" in second
+    assert '"type": "task_created"' in second
 
 
 def test_stream_events_after_seq_skips_earlier_events(pg_session: Session) -> None:
@@ -63,4 +63,4 @@ def test_stream_events_after_seq_skips_earlier_events(pg_session: Session) -> No
     gen = stream_events(run.id, after_seq=first_event.seq)
     only_frame = next(gen)
 
-    assert "event: task_created" in only_frame
+    assert '"type": "task_created"' in only_frame

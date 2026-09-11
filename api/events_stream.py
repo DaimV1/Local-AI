@@ -58,7 +58,11 @@ def _as_sse_frame(event: EventORM) -> str:
         "payload": event.payload,
         "ts": event.ts.isoformat(),
     }
-    return f"id: {event.seq}\nevent: {event.type}\ndata: {json.dumps(data)}\n\n"
+    # Deliberately no `event:` field: the browser EventSource API only
+    # routes to addEventListener(type, ...) for a named event, and the
+    # dashboard wants one onmessage handler for every event type, reading
+    # `type` from the JSON body instead.
+    return f"id: {event.seq}\ndata: {json.dumps(data)}\n\n"
 
 
 @router.get("/runs/{run_id}/events/stream")
